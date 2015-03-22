@@ -1,0 +1,144 @@
+---
+title: "Practical Machine Learning Project: Predicting Weight Lifting Movements"
+author: Warren McGee
+date: March 22, 2015
+output: html_document
+fontsize: 10pt
+---
+
+## Introduction
+
+The goal of this project was to construct a machine learning model that could recognize how well a client wearing a fitness tracker (e.g. FitBit, Nike Fuelband, Jawbone Up, etc.) is performing a barbell bicep curl, in order to provide specific feedback to the client to improve their movement. The data used for this project was taken from the [Weight Lifting Exercise Dataset][1] [(1)](#refs), which was collected by the [Groupware@LES][2] lab. The algorithm used for prediction was Random Forest. For the model produced, the out of the box (OOB) error rate (out-of-sample error estimate for Random Forest models) was 0.28%. The model was then able to predict the testing set observations (n=20) with 100% accuracy.
+
+## The data and movement classes
+
+For more information regarding how the data was collected, please refer to section 5 and 5.1 of the group's [paper][3] [(1)](#refs), which is summarized here.  
+
+The lab asked each of 6 participants (all male aged 20-28 years and with very little previous weightlifting experience) to do a set of 10 reps of a bicep curl using a dumbbell using one of five fashions: 
+* **Class A**: exactly according to specification
+* **Class B**: throwing the elbow to the front
+* **Class C**: lifting the dumbbell only halfway
+* **Class D**: lowering the dumbbell only halfway
+* **Class E**: throwing the hips to the front. 
+
+Class A is the correct movement, and the other four classes are common mistakes. An experienced weightlifter was present to ensure that each participant was performing the movement they were supposed to be simulating, and they used a light weight (1.25 kg) to make sure the participants could perform the incorrect movements safely.  
+
+The data was recorded using four 9 degrees of freedom Razor inertial measurement units (IMUs), which provide acceleration, gyroscope, and magnetometer values in all 3 axes. These were placed in the users' glove ("forearm"), armband ("arm"), lumbar belt ("belt") and dumbbell. From these, they calculated Euler angles (roll, pitch, and yaw; see [this article][9] for a great tutorial on what these values), as well as eight other features: mean, variance, standard deviation, max, min, amplitude, kurtosis, and skewness.    
+
+## Choice of Model: Random Forest Classifier
+
+From class, the best performing algorithms are Random Forest Classifiers and Boost (see for example, lecture ["Random Forests"][4] from week 3). I decided to use a Random Forest Classifier. How RF works is similar to a Classification and Regression Tree (CART): at each node of the tree, you use the predictor with the best ability to discriminate the observations to split the observations into two groups until you end up with sufficiently homogeneous subsets. The RF expands on this by using bootstrapping of both the data and the variables to construct mutliple trees, and then each constructed tree votes on how to classify each observation with a majority rule making the final determination. More information about Random Forests can been found in the ["Random Forests"][4] lecture from week 3, or [this tutorial][5]. 
+
+## Loading the data and Selection of Predictors
+
+In order to do this work, I needed to load the *caret* and *randomForest* packages:
+
+```{r library, eval=FALSE}
+library(caret)
+library(randomForest)
+```
+
+```{r libLoad, echo=FALSE}
+suppressMessages(library(caret))
+suppressMessages(library(randomForest))
+```
+
+Each observation in the training set has up to 159 potential predictors recorded to predict the class: several related to identifying the individual and the timestamp of the observation, and then several related to three fitness tracker devices (belt, forearm, and arm) and an additional device on the dumbbell. The timestamp and individual identification data won't be useful for this exercise, so I ignored that (there was discussion in the [original paper][3] about using individual-level aggregate data to help in predicting data for a new participant, but that is beyond the scope of this project). Several predictors are missing a massive number of values (>97% of all observations are missing), so I decided to simply ignore these rather than attempt to impute them. This resulted in reducing the set of predictors down to 52. The code for this is shown below, along with the list of predictors retained:
+
+```{r cleanData}
+org.training.data <- read.csv("~/Downloads/pml-training.csv")
+training.data <- org.training.data[,-1:-7]
+# some columns have "" to signify missing values and have been coerced to NA, generating warnings
+training.data[,-ncol(training.data)] <- suppressWarnings( apply( training.data[,-ncol(training.data)], 2, function(x) as.numeric(x) ) )
+num.nas <- apply( training.data, 2, function(x) sum( is.na(x) ) )
+
+# this number was found to be the minimum non-zero by visual inspection of num.nas
+cols.2.remove <- num.nas >= 19216
+clean.data <- training.data[,!cols.2.remove]
+clean.vals <- clean.data[,ncol(clean.data)]
+clean.predictors <- clean.data[,-ncol(clean.data)]
+
+table(names(clean.predictors))
+```
+
+In order to decide whether to include all of the features or to select a subset, I decided to use the *rfcv* function, using the default parameters. As seen in the table below, the reported cross validation error rate was <1% when using all predictors, as well as for half and one-quater of the predictors. With this many observations (19K), there is no danger of overfitting.
+
+```{r crossValidation, eval=F}
+set.seed(861989)
+selectionTest <- rfcv(clean.predictions, clean.vals)
+error.rates <- selectionTest$error.cv
+error.rates
+```
+
+```{r cvResults, echo=F}
+# the above code block is set to eval=F because it takes an exorbitant amount of time on my computer
+# the rates below are from the interactive session evaluating the code above using the same seed
+error.rates <- c(0.004382836, 0.005656916, 0.007134849, 0.039445520, 0.108500663, 0.593823260)
+names(error.rates) <- c(52,26,13,6,3,1)
+error.rates
+```
+
+## Building the model and Assessing Out-of-Sample Error
+
+As described in the [RF tutorial][6], the out-of-bag (OOB) erorr estimate is an unbiased estimate of the out-of-sample error rate, so there is no need for cross-validation to do this. The main variable that needs to be tuned to get maximum accuracy is "mtry", or the number of predictors to randomly select at each node to select the best discriminator. Theoretically, this number should be the floor of the square root of n, the number of predictors (in this case, 7); however, it the optimal number can sometimes vary, so one can use the *tuneRF* function from the *randomForest* package to select the optimal value for **mtry**. The code and results are shown below:
+
+```{r tuneRF, cache=T}
+set.seed(861989)
+model.fit <- tuneRF(x=clean.predictors, y=clean.vals, ntreeTry=100, stepFactor=1.5, doBest=T, importance=T)
+oob.err <- model.fit$err.rate[nrow(model.fit$err.rate),"OOB"]
+model.fit
+```
+
+The figure above shows the OOB error rate vs the value for mtry, with a minimum at the theoretical best value, 7. With *doBest=T*, the function then returns a randomForest object using the optimal mtry value. The printed output for that object is the call, the OOB error rate (`round(oob.err*100,2)`%), and the confusion matrix showing how the classifier does against the training data, along with the error rate for each class.
+
+To see how the OOB error rate and the error rate for each class changes as the random forest adds additional trees, the randomForest object tracks this for each tree and thus this can be plotted, as shown below:
+
+```{r plotErr, echo=F}
+err.rates <- model.fit$err.rate*100
+#color palette:  black, orange,	sky blue, bluish green, yellow, blue, vermillion, pink
+cbbPalette <- c(black="#000000", orange="#E69F00", cyan="#56B4E9", green="#009E73", yellow="#F0E442", blue="#0072B2", red="#D55E00", pink="#CC79A7")
+
+plot(err.rates[,"OOB"],type="l",log="y",ylim=c(0.05,10), xlab="Trees", ylab="Error Rate (%)", main="Out of the Box and Class Error Rates")
+lines(err.rates[,"A"], lty=2, col=cbbPalette["red"])
+lines(err.rates[,"B"], lty=3, col=cbbPalette["green"])
+lines(err.rates[,"C"], lty=4, col=cbbPalette["orange"])
+lines(err.rates[,"D"], lty=5, col=cbbPalette["cyan"])
+lines(err.rates[,"E"], lty=1, col=cbbPalette["pink"])
+legend(x="topright", legend=colnames(err.rates), lty=c(1,2,3,4,5,1), col=c(cbbPalette["black"], cbbPalette["red"], cbbPalette["green"], cbbPalette["orange"], cbbPalette["cyan"], cbbPalette["pink"]))
+```
+
+One way of interpreting how the Random Forest Classifier makes classification decisions, one can plot both the "variable importance" and the "Gini importance". This can be done using the *varImpPlot* function. The result is shown below:
+
+```{r plotImp, echo=F}
+varImpPlot(model.fit, main="Variable Importance and Gini Importance Plots")
+```
+
+The Variable Importance plot on the left shows how much the model's accuracy decreases if you remove each predictor, and the Gini Importance plot on the right shows how well each predictor improves the impurity, summed over all nodes in which that predictor is used in all trees. More information about these concepts can be found in the [tutorial][7]. This doesn't necessarily help in understanding how the trees voted on a particular observation, but it does help to understand the contribution of each variable to making the final decision. From the above charts, it seems the belt angles (yaw, roll, and pitch) were the most important predictors. Looking at other predictors based on client movements, the pitch of the forearm (that is, how far the forearm has moved forward or backward along a side-to-side axis)
+
+## Apply Model to Test Data and Summary
+
+Applying the model was straightforward using the *predict* function, as shown in the code below:
+
+```{r predict, eval=F}
+org.testing.data <- read.csv("~/Downloads/pml-testing.csv")
+predictor.cols <- colnames(clean.data)[-length(colnames(clean.data))]
+testing.data <- org.testing.data[,c(predictor.cols, "problem_id")]
+
+preds <- predict(model.fit, testing.data)
+```
+
+I used the pml_write_files function provided on [coursera][8] to write out each answer, and then submitted them. The model was 100% accurate in predicting the 20 test cases, which is expected given the OOB error rate of 0.28%, and thus the chance of getting at least one wrong answer was `round(pbinom(0, 20, oob.err, lower.tail=F)*100,1)`%.
+
+## References<a name="refs"></a>
+
+(1) Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. [Link to PDF][3]
+
+[1]: http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises "WLE Dataset"
+[2]: http://groupware.les.inf.puc-rio.br/har "HAR Project"
+[3]: http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf "Paper"
+[4]: https://class.coursera.org/predmachlearn-012/lecture "Video Lectures"
+[5]: http://www.stat.berkeley.edu/%7Ebreiman/RandomForests/cc_home.htm "RF Tutorial"
+[6]: http://www.stat.berkeley.edu/%7Ebreiman/RandomForests/cc_home.htm#ooberr "OOB Error"
+[7]: http://www.stat.berkeley.edu/%7Ebreiman/RandomForests/cc_home.htm#varimp "VarImp"
+[8]: https://class.coursera.org/predmachlearn-012/assignment/view?assignment_id=5 "SubmitCode"
+[9]: https://howthingsfly.si.edu/flight-dynamics/roll-pitch-and-yaw "Angles"
